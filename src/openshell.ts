@@ -8,7 +8,7 @@
 //   client.sandbox.create(spec) -> { id, name, workspace, phase, ... }
 //   client.sandbox.get(name, { workspace })
 //   client.sandbox.delete(name, { workspace, allowMissing })
-//   client.exec(name, argv, { workdir, environment, timeoutSecs, stdin, noLoginShell, signal })
+//   client.sandbox.exec(name, argv, { workdir, environment, timeoutSecs, stdin, noLoginShell, signal })
 //        -> { exitCode, stdout: Buffer, stderr: Buffer }
 //   client.raw.stopSandbox(req) / client.raw.startSandbox(req)
 // Transport failures are thrown (duck-typed `.code`); a non-zero command exit is
@@ -63,6 +63,11 @@ export interface SandboxObservation {
 // One lazy connection, reused across calls; rebuilt if the connection config
 // changes. The SDK connection is lazy itself (no I/O until the first RPC).
 let cached: { key: string; client: Promise<any> } | null = null;
+
+// How long to wait for a freshly created/started sandbox to reach a ready
+// (exec-able) state before giving up. The gateway returns "[rpc] sandbox is not
+// ready" if exec races ahead of the microVM/container boot.
+const READY_TIMEOUT_SECS = 120;
 
 function connectOptions(config: OpenshellConfig): Record<string, unknown> {
   if (!config.gatewayEndpoint) {
@@ -138,7 +143,12 @@ export async function createSandbox(
   const ref = await c.sandbox.create(spec);
   const name = typeof ref?.name === "string" ? ref.name : null;
   if (!name) throw new Error(`openshell create returned no name: ${JSON.stringify(ref).slice(0, 500)}`);
-  return { name, raw: ref as Record<string, unknown> };
+  // `create` returns as soon as the sandbox record exists; the microVM/container
+  // may still be starting. Exec against a not-yet-running box fails with
+  // "[rpc] sandbox is not ready", so block until it is actually ready before
+  // returning the lease/handle to callers (probe, realize, execute).
+  const readied = await c.sandbox.waitReady(name, READY_TIMEOUT_SECS, wsOpts(config));
+  return { name, raw: (readied ?? ref) as Record<string, unknown> };
 }
 
 export async function execInSandbox(
@@ -158,7 +168,7 @@ export async function execInSandbox(
   if (req.stdin != null) options.stdin = Buffer.from(req.stdin, "utf8");
 
   try {
-    const res = await c.exec(name, argv, options);
+    const res = await c.sandbox.exec(name, argv, options);
     return {
       exitCode: typeof res?.exitCode === "number" ? res.exitCode : null,
       stdout: res?.stdout != null ? Buffer.from(res.stdout).toString("utf8") : "",
@@ -193,6 +203,9 @@ export async function startSandbox(config: OpenshellConfig, name: string): Promi
   // start/stop are not curated; use the raw wire client. Confirm the request
   // field names (name/workspace) against the generated StartSandboxRequest.
   await c.raw.startSandbox({ name, ...wsOpts(config) });
+  // A restarted sandbox is also not immediately exec-able; wait for ready so a
+  // resumed lease's first exec does not race the boot ("[rpc] sandbox is not ready").
+  await c.sandbox.waitReady(name, READY_TIMEOUT_SECS, wsOpts(config));
 }
 
 export async function stopSandbox(config: OpenshellConfig, name: string): Promise<void> {
