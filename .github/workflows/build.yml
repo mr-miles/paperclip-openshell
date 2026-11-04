@@ -1,0 +1,62 @@
+name: build
+
+# Builds the plugin's worker bundle (dist/) and packs a loadable tarball.
+# A Paperclip sandbox-provider plugin is a Node worker (dist/worker.js), not a
+# native binary, so "the build" is the TypeScript -> JS compile plus `npm pack`.
+#
+# Dependency note: both deps come from non-public registries —
+#   @nvidia/openshell-sdk   : GitHub Packages (needs a token with read:packages)
+#   @paperclipai/plugin-sdk : the Paperclip monorepo (publish/vendor/link it, or
+#                             add its registry below) — must be resolvable or the
+#                             install step fails.
+# Set a repo/org secret NODE_AUTH_TOKEN (a PAT with read:packages for @nvidia).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          # Scope @nvidia to GitHub Packages; other scopes resolve from the
+          # default npm registry.
+          registry-url: https://npm.pkg.github.com
+          scope: "@nvidia"
+
+      - name: Install dependencies
+        run: npm ci || npm install
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Build (tsc -> dist/)
+        run: npm run build
+
+      - name: Pack loadable tarball
+        run: npm pack
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: paperclip-plugin-openshell-dist
+          path: |
+            dist/
+            package.json
+          if-no-files-found: error
+
+      - name: Upload package tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: paperclip-plugin-openshell-tgz
+          path: "*.tgz"
+          if-no-files-found: error

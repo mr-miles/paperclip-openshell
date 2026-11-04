@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+
+# build output (produced by `npm run build` / CI)
+dist/
+*.tsbuildinfo
+
+# packaged tarball (`npm pack`)
+*.tgz
+
+# npm auth / registry config (may contain GitHub Packages tokens)
+.npmrc
+
+# env / secrets
+.env
+.env.*
+
+# misc
+*.log
+coverage/
+.DS_Store

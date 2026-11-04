@@ -1,0 +1,25 @@
+{
+  "name": "paperclip-plugin-openshell",
+  "version": "0.1.0",
+  "description": "Paperclip sandbox-provider plugin that provisions NVIDIA OpenShell sandboxes (e.g. Firecracker microVMs via openshell-firecracker) as Paperclip execution environments.",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@nvidia/openshell-sdk": "*",
+    "@paperclipai/plugin-sdk": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
