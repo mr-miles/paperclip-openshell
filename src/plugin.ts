@@ -136,7 +136,7 @@ const plugin = definePlugin({
       name = created.name;
       const check = await execInSandbox(config, name, {
         command: "sh",
-        args: ["-c", "for c in sh tar node; do command -v \"$c\" >/dev/null || echo \"missing:$c\"; done"],
+        args: ["-c", "for c in sh tar; do command -v \"$c\" >/dev/null || echo \"missing:$c\"; done"],
         timeoutMs: 60_000,
       });
       const missing = check.stdout
@@ -153,7 +153,7 @@ const plugin = definePlugin({
       }
       return {
         ok: true,
-        summary: `Created an OpenShell sandbox from ${config.image}; sh/tar/node present.`,
+        summary: `Created an OpenShell sandbox from ${config.image}; sh/tar present.`,
         metadata: { provider: "openshell", image: config.image, sandboxName: name },
       };
     } catch (error) {
