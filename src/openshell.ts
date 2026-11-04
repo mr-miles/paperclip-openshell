@@ -69,9 +69,13 @@ function connectOptions(config: OpenshellConfig): Record<string, unknown> {
     throw new Error("openshell: `gatewayEndpoint` (gateway URL) is required.");
   }
   const opts: Record<string, unknown> = { gateway: config.gatewayEndpoint };
-  if (config.caCertPath) opts.caCert = readFileSync(config.caCertPath);
-  if (config.clientCertPath) opts.clientCert = readFileSync(config.clientCertPath);
-  if (config.clientKeyPath) opts.clientKey = readFileSync(config.clientKeyPath);
+  // These carry PEM *contents* (not filesystem paths): Paperclip resolves a
+  // `secret-ref` field to the secret's value and substitutes it inline, and a
+  // plain field holds its literal value. The SDK wants PEM bytes, so wrap the
+  // string in a Buffer — mirroring how `oidcToken` is used as a value below.
+  if (config.caCertPath) opts.caCert = Buffer.from(config.caCertPath);
+  if (config.clientCertPath) opts.clientCert = Buffer.from(config.clientCertPath);
+  if (config.clientKeyPath) opts.clientKey = Buffer.from(config.clientKeyPath);
   if (config.oidcToken) opts.oidcToken = config.oidcToken;
   if (config.insecureSkipVerify) opts.insecureSkipVerify = true;
   if (config.allowInsecureAuth) opts.allowInsecureAuth = true;
