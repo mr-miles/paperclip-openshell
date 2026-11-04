@@ -4,12 +4,11 @@ name: build
 # A Paperclip sandbox-provider plugin is a Node worker (dist/worker.js), not a
 # native binary, so "the build" is the TypeScript -> JS compile plus `npm pack`.
 #
-# Dependency note: both deps come from non-public registries —
-#   @nvidia/openshell-sdk   : GitHub Packages (needs a token with read:packages)
-#   @paperclipai/plugin-sdk : the Paperclip monorepo (publish/vendor/link it, or
-#                             add its registry below) — must be resolvable or the
-#                             install step fails.
-# Set a repo/org secret NODE_AUTH_TOKEN (a PAT with read:packages for @nvidia).
+# Dependency note: @nvidia/openshell-sdk is published on GitHub Packages and
+# needs a token with read:packages (set a repo/org secret NODE_AUTH_TOKEN, or
+# the default GITHUB_TOKEN is used). @paperclipai/plugin-sdk comes from npm and
+# is pinned to the Paperclip release this plugin targets. package-lock.json is
+# committed and installs use `npm ci`, so the build is reproducible.
 
 on:
   push:
@@ -17,27 +16,33 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: "20"
-          # Scope @nvidia to GitHub Packages; other scopes resolve from the
-          # default npm registry.
+          node-version: "24" # Paperclip requires >= 24.11
+          cache: npm
           registry-url: https://npm.pkg.github.com
           scope: "@nvidia"
 
       - name: Install dependencies
-        run: npm ci || npm install
+        run: npm ci
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
 
       - name: Build (tsc -> dist/)
         run: npm run build
@@ -45,17 +50,8 @@ jobs:
       - name: Pack loadable tarball
         run: npm pack
 
-      - name: Upload dist
-        uses: actions/upload-artifact@v4
-        with:
-          name: paperclip-plugin-openshell-dist
-          path: |
-            dist/
-            package.json
-          if-no-files-found: error
-
       - name: Upload package tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: paperclip-plugin-openshell-tgz
           path: "*.tgz"

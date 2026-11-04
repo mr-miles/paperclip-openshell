@@ -1,0 +1,63 @@
+name: release
+
+# Push a tag like v0.2.0 to build the plugin as an npm package tarball
+# (`npm pack`) and attach it to a GitHub release. Nothing is published to a
+# registry. The tag must match package.json and the manifest version, because
+# Paperclip identifies plugin upgrades by the manifest version.
+#   git tag v0.2.0 && git push origin v0.2.0
+# To use it: extract the tarball (it unpacks to package/), run `npm install --omit=dev`
+# inside (needs the @nvidia GitHub Packages registry), then
+# `paperclipai plugin install <that dir>`. Installing a .tgz path directly is untested.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # GitHub release
+  packages: read # @nvidia/openshell-sdk lives on GitHub Packages
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24" # Paperclip requires >= 24.11
+          cache: npm
+          registry-url: https://npm.pkg.github.com
+          scope: "@nvidia"
+
+      - name: Check tag matches package.json and manifest versions
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          man="$(sed -n 's/^const PLUGIN_VERSION = "\(.*\)";/\1/p' src/manifest.ts)"
+          echo "tag=$TAG package.json=$pkg manifest=$man"
+          [ "$TAG" = "v$pkg" ] || { echo "::error::tag $TAG != v$pkg (package.json)"; exit 1; }
+          [ "$man" = "$pkg" ] || { echo "::error::src/manifest.ts version '$man' != package.json '$pkg'"; exit 1; }
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build (tsc -> dist/)
+        run: npm run build
+
+      - name: Pack npm package tarball
+        run: npm pack
+
+      - name: Create GitHub release with the tarball
+        run: gh release create "$TAG" ./*.tgz --title "$TAG" --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
