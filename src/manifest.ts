@@ -43,18 +43,27 @@ const manifest: PaperclipPluginManifestV1 = {
           },
           caCertPath: {
             type: "string",
-            format: "secret-ref",
-            description: "Path to a PEM CA bundle for the gateway TLS. Omit to use system roots.",
+            title: "CA Cert",
+            // maxLength > 200 makes the UI render a multi-line textarea (its
+            // `maxLength > 200` rule). Avoid `format: "textarea"` — the config
+            // validator (AJV, strict) throws on that as an unknown format.
+            maxLength: 200000,
+            description:
+              "PEM contents of the CA bundle for the gateway TLS (public material; paste inline). Omit to use system roots.",
           },
           clientCertPath: {
             type: "string",
-            format: "secret-ref",
-            description: "Path to a PEM client certificate for mTLS auth to the gateway.",
+            title: "Client Cert",
+            maxLength: 200000,
+            description:
+              "PEM contents of the client certificate for mTLS auth to the gateway (public material; paste inline).",
           },
           clientKeyPath: {
             type: "string",
+            title: "Client Key",
             format: "secret-ref",
-            description: "Path to the PEM client key for mTLS auth to the gateway.",
+            description:
+              "PEM contents of the client private key for mTLS auth to the gateway. Sensitive — bind to a secret.",
           },
           oidcToken: {
             type: "string",

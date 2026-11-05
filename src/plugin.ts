@@ -20,6 +20,7 @@ import {
   deleteSandbox,
   execInSandbox,
   getSandbox,
+  listProviderNames,
   startSandbox,
   stopSandbox,
   type OpenshellConfig,
@@ -130,13 +131,42 @@ const plugin = definePlugin({
     params: PluginEnvironmentProbeParams,
   ): Promise<PluginEnvironmentProbeResult> {
     const config = parseConfig(params.config);
+    // Verify any configured providers (e.g. the `anthropic-egress` /
+    // `paperclip-egress` egress profiles) actually exist on the gateway, so a
+    // missing one is reported plainly by the Test button rather than surfacing
+    // later as an opaque create/attach failure. Listing may be restricted for
+    // the plugin's identity; if so, skip and let the create-time attach validate.
+    if (config.providers.length > 0) {
+      try {
+        const existing = new Set(await listProviderNames(config));
+        // Only flag missing when we can actually see providers. An empty list
+        // can mean the plugin's identity lacks visibility (provider listing is
+        // owner/identity-scoped) rather than "none exist" — do not block a
+        // config we cannot introspect; the create-time attach still validates.
+        const missing = existing.size > 0 ? config.providers.filter((p) => !existing.has(p)) : [];
+        if (missing.length > 0) {
+          const ws = config.workspace ?? "default";
+          return {
+            ok: false,
+            summary:
+              `OpenShell providers not found in workspace "${ws}": ${missing.join(", ")}. ` +
+              `Import the profile and create the provider, e.g. ` +
+              `\`openshell --workspace ${ws} provider create --name ${missing[0]} --type ${missing[0]}\`.`,
+            metadata: { provider: "openshell", workspace: ws, missingProviders: missing },
+          };
+        }
+      } catch {
+        // Listing not permitted/unavailable — fall through; the create-time
+        // attach below still fails if a provider is genuinely missing.
+      }
+    }
     let name: string | null = null;
     try {
       const created = await createSandbox(config);
       name = created.name;
       const check = await execInSandbox(config, name, {
         command: "sh",
-        args: ["-c", "for c in sh tar node; do command -v \"$c\" >/dev/null || echo \"missing:$c\"; done"],
+        args: ["-c", "for c in sh tar; do command -v \"$c\" >/dev/null || echo \"missing:$c\"; done"],
         timeoutMs: 60_000,
       });
       const missing = check.stdout
@@ -153,7 +183,7 @@ const plugin = definePlugin({
       }
       return {
         ok: true,
-        summary: `Created an OpenShell sandbox from ${config.image}; sh/tar/node present.`,
+        summary: `Created an OpenShell sandbox from ${config.image}; sh/tar present.`,
         metadata: { provider: "openshell", image: config.image, sandboxName: name },
       };
     } catch (error) {

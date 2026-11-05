@@ -8,7 +8,7 @@
 //   client.sandbox.create(spec) -> { id, name, workspace, phase, ... }
 //   client.sandbox.get(name, { workspace })
 //   client.sandbox.delete(name, { workspace, allowMissing })
-//   client.exec(name, argv, { workdir, environment, timeoutSecs, stdin, noLoginShell, signal })
+//   client.sandbox.exec(name, argv, { workdir, environment, timeoutSecs, stdin, noLoginShell, signal })
 //        -> { exitCode, stdout: Buffer, stderr: Buffer }
 //   client.raw.stopSandbox(req) / client.raw.startSandbox(req)
 // Transport failures are thrown (duck-typed `.code`); a non-zero command exit is
@@ -64,14 +64,23 @@ export interface SandboxObservation {
 // changes. The SDK connection is lazy itself (no I/O until the first RPC).
 let cached: { key: string; client: Promise<any> } | null = null;
 
+// How long to wait for a freshly created/started sandbox to reach a ready
+// (exec-able) state before giving up. The gateway returns "[rpc] sandbox is not
+// ready" if exec races ahead of the microVM/container boot.
+const READY_TIMEOUT_SECS = 120;
+
 function connectOptions(config: OpenshellConfig): Record<string, unknown> {
   if (!config.gatewayEndpoint) {
     throw new Error("openshell: `gatewayEndpoint` (gateway URL) is required.");
   }
   const opts: Record<string, unknown> = { gateway: config.gatewayEndpoint };
-  if (config.caCertPath) opts.caCert = readFileSync(config.caCertPath);
-  if (config.clientCertPath) opts.clientCert = readFileSync(config.clientCertPath);
-  if (config.clientKeyPath) opts.clientKey = readFileSync(config.clientKeyPath);
+  // These carry PEM *contents* (not filesystem paths): Paperclip resolves a
+  // `secret-ref` field to the secret's value and substitutes it inline, and a
+  // plain field holds its literal value. The SDK wants PEM bytes, so wrap the
+  // string in a Buffer — mirroring how `oidcToken` is used as a value below.
+  if (config.caCertPath) opts.caCert = Buffer.from(config.caCertPath);
+  if (config.clientCertPath) opts.clientCert = Buffer.from(config.clientCertPath);
+  if (config.clientKeyPath) opts.clientKey = Buffer.from(config.clientKeyPath);
   if (config.oidcToken) opts.oidcToken = config.oidcToken;
   if (config.insecureSkipVerify) opts.insecureSkipVerify = true;
   if (config.allowInsecureAuth) opts.allowInsecureAuth = true;
@@ -97,6 +106,27 @@ async function client(config: OpenshellConfig): Promise<any> {
 
 function wsOpts(config: OpenshellConfig): Record<string, unknown> {
   return config.workspace ? { workspace: config.workspace } : {};
+}
+
+/**
+ * List the names of the providers that exist on the gateway in the sandbox's
+ * workspace. Used by the probe to verify that any configured `providers`
+ * (e.g. the `anthropic-egress` / `paperclip-egress` egress profiles) have been
+ * imported and instantiated, so a missing one is reported clearly instead of
+ * surfacing later as an opaque create/attach failure. Uses the raw wire client
+ * (ListProviders is not wrapped by a curated sub-client). The workspace oneof
+ * selector takes `default` for the gateway's default workspace.
+ */
+export async function listProviderNames(config: OpenshellConfig): Promise<string[]> {
+  const c = await client(config);
+  const resp = await c.raw.listProviders({
+    workspaceScope: { selection: { case: "workspace", value: config.workspace ?? "default" } },
+    pageSize: 1000,
+  });
+  const providers = Array.isArray(resp?.providers) ? resp.providers : [];
+  return providers
+    .map((p: { metadata?: { name?: unknown } }) => p?.metadata?.name)
+    .filter((n: unknown): n is string => typeof n === "string" && n.length > 0);
 }
 
 function errCode(err: unknown): string | undefined {
@@ -134,7 +164,27 @@ export async function createSandbox(
   const ref = await c.sandbox.create(spec);
   const name = typeof ref?.name === "string" ? ref.name : null;
   if (!name) throw new Error(`openshell create returned no name: ${JSON.stringify(ref).slice(0, 500)}`);
-  return { name, raw: ref as Record<string, unknown> };
+  // `create` returns as soon as the sandbox record exists; the microVM/container
+  // may still be starting. Exec against a not-yet-running box fails with
+  // "[rpc] sandbox is not ready", so block until it is actually ready before
+  // returning the lease/handle to callers (probe, realize, execute).
+  const readied = await c.sandbox.waitReady(name, READY_TIMEOUT_SECS, wsOpts(config));
+  // Ensure the configured working directory exists. The sandbox wraps every
+  // exec in a login shell that `cd`s to the exec's workdir, so a missing
+  // `remoteCwd` makes *every* subsequent exec — including the host's auth and
+  // `claude` launch probes — fail at the `cd` (seen as
+  // `cd: <remoteCwd>: No such file or directory`). Create it once here, running
+  // the bootstrap exec itself from "/" (always present) so this exec's own `cd`
+  // does not hit the same missing directory. `mkdir -p` is idempotent, so this
+  // is a no-op when the directory already exists.
+  if (config.remoteCwd) {
+    const quoted = `'${config.remoteCwd.replace(/'/g, `'\\''`)}'`;
+    await c.sandbox.exec(name, ["sh", "-c", `mkdir -p ${quoted}`], {
+      ...wsOpts(config),
+      workdir: "/",
+    });
+  }
+  return { name, raw: (readied ?? ref) as Record<string, unknown> };
 }
 
 export async function execInSandbox(
@@ -154,7 +204,7 @@ export async function execInSandbox(
   if (req.stdin != null) options.stdin = Buffer.from(req.stdin, "utf8");
 
   try {
-    const res = await c.exec(name, argv, options);
+    const res = await c.sandbox.exec(name, argv, options);
     return {
       exitCode: typeof res?.exitCode === "number" ? res.exitCode : null,
       stdout: res?.stdout != null ? Buffer.from(res.stdout).toString("utf8") : "",
@@ -189,6 +239,9 @@ export async function startSandbox(config: OpenshellConfig, name: string): Promi
   // start/stop are not curated; use the raw wire client. Confirm the request
   // field names (name/workspace) against the generated StartSandboxRequest.
   await c.raw.startSandbox({ name, ...wsOpts(config) });
+  // A restarted sandbox is also not immediately exec-able; wait for ready so a
+  // resumed lease's first exec does not race the boot ("[rpc] sandbox is not ready").
+  await c.sandbox.waitReady(name, READY_TIMEOUT_SECS, wsOpts(config));
 }
 
 export async function stopSandbox(config: OpenshellConfig, name: string): Promise<void> {
