@@ -108,6 +108,27 @@ function wsOpts(config: OpenshellConfig): Record<string, unknown> {
   return config.workspace ? { workspace: config.workspace } : {};
 }
 
+/**
+ * List the names of the providers that exist on the gateway in the sandbox's
+ * workspace. Used by the probe to verify that any configured `providers`
+ * (e.g. the `anthropic-egress` / `paperclip-egress` egress profiles) have been
+ * imported and instantiated, so a missing one is reported clearly instead of
+ * surfacing later as an opaque create/attach failure. Uses the raw wire client
+ * (ListProviders is not wrapped by a curated sub-client). The workspace oneof
+ * selector takes `default` for the gateway's default workspace.
+ */
+export async function listProviderNames(config: OpenshellConfig): Promise<string[]> {
+  const c = await client(config);
+  const resp = await c.raw.listProviders({
+    workspaceScope: { selection: { case: "workspace", value: config.workspace ?? "default" } },
+    pageSize: 1000,
+  });
+  const providers = Array.isArray(resp?.providers) ? resp.providers : [];
+  return providers
+    .map((p: { metadata?: { name?: unknown } }) => p?.metadata?.name)
+    .filter((n: unknown): n is string => typeof n === "string" && n.length > 0);
+}
+
 function errCode(err: unknown): string | undefined {
   return typeof err === "object" && err !== null ? (err as { code?: string }).code : undefined;
 }
@@ -148,6 +169,21 @@ export async function createSandbox(
   // "[rpc] sandbox is not ready", so block until it is actually ready before
   // returning the lease/handle to callers (probe, realize, execute).
   const readied = await c.sandbox.waitReady(name, READY_TIMEOUT_SECS, wsOpts(config));
+  // Ensure the configured working directory exists. The sandbox wraps every
+  // exec in a login shell that `cd`s to the exec's workdir, so a missing
+  // `remoteCwd` makes *every* subsequent exec — including the host's auth and
+  // `claude` launch probes — fail at the `cd` (seen as
+  // `cd: <remoteCwd>: No such file or directory`). Create it once here, running
+  // the bootstrap exec itself from "/" (always present) so this exec's own `cd`
+  // does not hit the same missing directory. `mkdir -p` is idempotent, so this
+  // is a no-op when the directory already exists.
+  if (config.remoteCwd) {
+    const quoted = `'${config.remoteCwd.replace(/'/g, `'\\''`)}'`;
+    await c.sandbox.exec(name, ["sh", "-c", `mkdir -p ${quoted}`], {
+      ...wsOpts(config),
+      workdir: "/",
+    });
+  }
   return { name, raw: (readied ?? ref) as Record<string, unknown> };
 }
 

@@ -1,0 +1,18 @@
+# Network-only provider profile (no credentials). Opens egress to the Paperclip
+# HTTP bridge so the agent can call back to Paperclip during a run.
+#
+#   openshell provider profile lint   -f paperclip-egress.yaml
+#   openshell provider profile import -f paperclip-egress.yaml --global
+#
+# Adjust the host:port to how your sandbox reaches Paperclip — host.openshell.internal
+# and your PAPERCLIP_LISTEN_PORT (default 3100). Not needed for the hello test
+# (that only needs anthropic-egress); required for full agent runs.
+id: paperclip-egress
+display_name: Paperclip bridge egress
+description: Egress to the Paperclip HTTP bridge
+category: data
+endpoints:
+  - { host: host.openshell.internal, port: 3100 }
+binaries:
+  - /home/agent/.local/bin/claude
+  - /home/agent/.local/share/claude/versions/**

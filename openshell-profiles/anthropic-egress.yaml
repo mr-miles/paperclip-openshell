@@ -1,0 +1,109 @@
+# Claude subscription provider profile for the paperclip-openshell plugin.
+#
+#   openshell provider profile lint   -f anthropic-egress.yaml
+#   openshell provider profile import -f anthropic-egress.yaml            # workspace-scoped
+#
+# WHY THIS HOLDS A CREDENTIAL (it used to be network-only):
+# Paperclip's managed Claude *subscription* connection does not ship the real
+# OAuth token into the sandbox. The claude-local adapter only materialises the
+# `sk-ant-oat01-proxy-managed` sentinel into ~/.claude/.credentials.json; in
+# Paperclip's own runtime the real token is swapped in at the egress proxy
+# (gateway.docker.internal:3128). OpenShell sandboxes bypass that proxy, so the
+# sentinel reaches api.anthropic.com unchanged and auth fails.
+#
+# This profile replicates that swap on the OpenShell side: `claude` keeps the
+# sentinel, and the gateway injects the REAL `Authorization: Bearer <token>` on
+# every outbound request to the Anthropic hosts below, refreshing it from the
+# subscription's OAuth refresh token. The real secret lives only at the gateway
+# (refresh material is never injected into the sandbox).
+#
+# Modelled on osh-core providers/google-vertex-ai.yaml (OAuth bearer + gateway
+# refresh) and anthropic.yaml (Anthropic egress). The gateway's
+# oauth2_refresh_token mint (openshell-server provider_refresh.rs) POSTs
+# `grant_type=refresh_token&client_id=…&refresh_token=…` to `token_url`, treats
+# `client_secret` as optional (Anthropic's Claude client is a public PKCE
+# client, so there is none), and persists Anthropic's rotated refresh token.
+#
+# SEEDING THE REAL TOKENS (done once, on the gateway/operator host — the values
+# are NOT stored in this file):
+#   1. Get a genuine subscription token on a logged-in machine:
+#        claude setup-token        # writes ~/.claude/.credentials.json
+#      then read claudeAiOauth.accessToken (sk-ant-oat01-…) and
+#      claudeAiOauth.refreshToken (sk-ant-ort01-…).
+#   2. Configure the refresh material for this provider instance. The secret
+#      refresh token is read from a local env var (kept out of argv/history):
+#        export CLAUDE_REFRESH_TOKEN='sk-ant-ort01-…'
+#        openshell --workspace <ws> provider refresh configure anthropic-egress \
+#          --credential-key access_token \
+#          --strategy oauth2-refresh-token \
+#          --material client_id=<claude-oauth-client-id> \
+#          --secret-material-env refresh_token=CLAUDE_REFRESH_TOKEN
+#      (client_id is the public Claude Code OAuth client ID — confirm the
+#      current value for your subscription. The gateway's mint_oauth2_refresh_token
+#      treats client_secret as optional, so a public PKCE client needs none.)
+#
+# VERIFY BEFORE RELYING ON IT:
+#   - token_url below is the Claude OAuth token endpoint — confirm it for your
+#     subscription before import.
+#   - That gateway header injection REPLACES (not appends) the Authorization
+#     header `claude` already sends with the sentinel. Smoke test with a run.
+#
+# `binaries` is the least-privilege control: OpenShell matches by executable,
+# exact paths resolve symlinks, globs must hit the real path. `claude` installed
+# via the native script lands under ~/.local; widen these if a run shows egress
+# denied.
+id: anthropic-egress
+display_name: Claude subscription (OAuth)
+description: Anthropic egress for the managed Claude subscription, with gateway-injected OAuth bearer credential
+category: inference
+inference_capable: true
+credentials:
+  # Gateway-minted Claude OAuth access token. required:false because its value
+  # is produced by the refresh below from the material, not supplied directly
+  # (same shape as google-vertex-ai.yaml's gcloud_adc_token). Injected as the
+  # Authorization bearer on egress, and projected into the sandbox env so a
+  # client that reads CLAUDE_CODE_OAUTH_TOKEN picks it up too.
+  - description: Claude subscription OAuth refresh token (gateway-refreshed; sk-ant-ort01-…)
+    env_vars:
+      - ANTHROPIC_OAUTH_REFRESH_TOKEN
+    name: refresh_token
+  - name: access_token
+    description: Claude subscription OAuth access token (gateway-refreshed; sk-ant-oat01-…)
+    env_vars:
+      - ANTHROPIC_OAUTH_TOKEN
+    required: false
+    auth_style: bearer
+    header_name: authorization
+    refresh:
+      strategy: oauth2_refresh_token
+      token_url: https://platform.claude.com/v1/oauth/token      
+      refresh_before_seconds: 300
+      max_lifetime_seconds: 3600
+      scopes:
+        - user:file_upload
+        - user:inference
+        - user:mcp_servers
+        - user:profile
+        - user:sessions:claude_code
+      material:
+        - name: client_id
+          description: Claude OAuth client ID (public Claude Code PKCE client)
+          required: true
+        - name: refresh_token
+          description: Claude subscription OAuth refresh token (sk-ant-ort01-…)
+          required: true
+          secret: true
+discovery:
+  credentials: [access_token]
+endpoints:
+  - { host: api.anthropic.com, port: 443, protocol: rest, access: read-write, enforcement: enforce }
+  - { host: console.anthropic.com, port: 443, protocol: rest, access: read-write, enforcement: enforce }
+  - { host: claude.ai, port: 443, protocol: rest, access: read-write, enforcement: enforce }
+  - { host: mcp-proxy.anthropic.com, port: 443, protocol: rest, access: read-write, enforcement: enforce }
+  - { host: platform.claude.com, port: 443, protocol: rest, access: read-write, enforcement: enforce }
+  - { host: downloads.claude.ai, port: 443, protocol: rest, access: read-write, enforcement: enforce }
+  - { host: claude.com, port: 443, protocol: rest, access: read-write, enforcement: enforce }
+  - { host: code.claude.com, port: 443, protocol: rest, access: read-write, enforcement: enforce }
+binaries:
+  - /home/agent/.local/bin/claude
+  - /home/agent/.local/share/claude/versions/**
